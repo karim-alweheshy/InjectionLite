@@ -26,9 +26,10 @@ import UIKit
 typealias OSApplication = UIApplication
 #endif
 
-/// Message Xcode console
+/// Message Xcode console - now uses UnifiedLogger
 public func log(_ what: Any..., prefix: String = APP_PREFIX, separator: String = " ") {
-    print(prefix+what.map {"\($0)"}.joined(separator: separator))
+    let message = what.map { "\($0)" }.joined(separator: separator)
+    UnifiedLogger.shared.info(message)
 }
 
 public struct Reloader {

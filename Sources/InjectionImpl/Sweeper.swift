@@ -40,7 +40,7 @@ public struct Sweeper {
 
                 // Thanks https://github.com/johnno1962/injectionforxcode/pull/234
                 if !testClasses.isEmpty {
-                    print("\n")
+                    UnifiedLogger.shared.debug("")
                     testQueue.async {
                         testQueue.suspend()
                         let timer = Timer(timeInterval: 0, repeats:false, block: { _ in
@@ -232,7 +232,7 @@ class SwiftSweeper {
             case .set, .collection:
                 let containsType = _typeName(type(of: value)).contains(".Type")
                 if debugSweep {
-                    print("Sweeping collection:", _typeName(type(of: value)))
+                    UnifiedLogger.shared.debug("Sweeping collection: \(_typeName(type(of: value)))")
                 }
                 for (_, child) in mirror.children {
                     sweepValue(child, containsType)
@@ -273,7 +273,7 @@ class SwiftSweeper {
             }
 
             if debugSweep {
-                print("Sweeping instance \(reference) of class \(type(of: instance))")
+                UnifiedLogger.shared.debug("Sweeping instance \(reference) of class \(type(of: instance))")
             }
 
             sweepMembers(instance)

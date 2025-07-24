@@ -65,8 +65,9 @@ open class InjectionBase: NSObject {
         watcher = FileWatcher(roots: dirs, callback: { filesChanged in
             for file in filesChanged {
                 if let whyNot = self.shouldExclude(file: file) {
-                    log("\(file) excluded as \(whyNot)")
+                    log(level: .debug, "\(file) excluded as \(whyNot)")
                 } else {
+                    log(level: .info, "Injecting: \(file)")
                     self.inject(source: file)
                 }
             }
