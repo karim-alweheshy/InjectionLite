@@ -87,35 +87,34 @@ public class BazelAQueryParser: LiteParser {
         let appTargetKey = detectedAppTarget ?? "no-target"
         let cacheKey = "\(source):\(platformFilter):\(appTargetKey)"
         if let cachedCommand = getCachedCommand(for: cacheKey) {
-            log("💾 Using cached Bazel command for \(source)")
+            log("💾 Using cached optimized Bazel command for \(source)")
             return cachedCommand
         }
         
         // Use synchronous wrapper for async operations to conform to LiteParser protocol
-        let command = findCompilationCommandSync(for: source, platformFilter: platformFilter)
-        
-        if let command = command {
-            // Cache the successful result
-            setCachedCommand(command, for: cacheKey)
-            log("✅ Found Bazel compilation command for \(source)")
-        } else {
+        guard let rawCommand = findCompilationCommandSync(for: source, platformFilter: platformFilter) else {
             log("❌ No Bazel compilation command found for \(source)")
+            return nil
         }
         
-        return command
+        // Apply frontend optimizations early (cacheable transformations)
+        let optimizedCommand = applyFrontendOptimizations(to: rawCommand, primaryFile: source)
+        
+        // Cache the optimized result
+        setCachedCommand(optimizedCommand, for: cacheKey)
+        log("✅ Found and optimized Bazel compilation command for \(source)")
+        
+        return optimizedCommand
     }
     
     public func prepareFinalCommand(command: String, source: String, objectFile: String, tmpdir: String, injectionNumber: Int) -> String {
-        // Replace bazel-out with workspace-absolute paths
-        let commandWithAbsolutePaths = makeBazelOutPathsAbsolute(in: command)
         
-        // Handle Bazel's output-file-map if present
         let outputFileMapRegex = #" -output-file-map ([^\s\\]*(?:\\.[^\s\\]*)*)"#
-        if let outputFileMapPath = (commandWithAbsolutePaths[outputFileMapRegex] as String?)?.unescape {
-            return createMinimalOutputFileMapCommand(command: commandWithAbsolutePaths, source: source, objectFile: objectFile, outputFileMapPath: outputFileMapPath, tmpdir: tmpdir, injectionNumber: injectionNumber)
+        if let outputFileMapPath = (command[outputFileMapRegex] as String?)?.unescape {
+            return createMinimalOutputFileMapCommand(command: command, source: source, objectFile: objectFile, outputFileMapPath: outputFileMapPath, tmpdir: tmpdir, injectionNumber: injectionNumber)
         } else {
-            // Fallback to traditional -o flag
-            return commandWithAbsolutePaths + " -o \(objectFile)"
+            // Traditional -o flag fallback
+            return command + " -o \(objectFile)"
         }
     }
     
@@ -131,6 +130,27 @@ public class BazelAQueryParser: LiteParser {
         return updatedCommand
     }
     
+    // MARK: - Frontend Optimization (Cacheable)
+    
+    /// Apply frontend optimizations that can be cached and reused
+    /// This includes path normalization, frontend transformation, and command cleaning
+    private func applyFrontendOptimizations(to command: String, primaryFile: String) -> String {
+        log("⚡ Applying frontend optimizations to command")
+        
+        // Step 1: Replace bazel-out with workspace-absolute paths
+        let commandWithAbsolutePaths = makeBazelOutPathsAbsolute(in: command)
+        
+        // Step 2: Try to optimize with Swift frontend mode for single-file compilation
+        if let frontendCommand = transformToFrontendMode(command: commandWithAbsolutePaths, primaryFile: primaryFile) {
+            log("✅ Applied frontend mode optimization")
+            return frontendCommand
+        }
+        
+        // Step 3: Fallback - return command with absolute paths
+        log("⚡ Using fallback approach (no frontend optimization)")
+        return commandWithAbsolutePaths
+    }
+
     // MARK: - Private Implementation
     
     private func findCompilationCommandSync(for sourcePath: String, platformFilter: String) -> String? {
@@ -393,6 +413,139 @@ public class BazelAQueryParser: LiteParser {
     
     private func setCachedCommand(_ command: String, for key: String) {
         BazelAQueryParser.commandCache.setObject(command as NSString, forKey: key as NSString)
+    }
+    
+    // MARK: - Swift Frontend Optimization
+    
+    /// Extract Swift source files from a Bazel compilation command
+    /// Returns tuple of (all swift files, swift files without the changed file)
+    private func extractSwiftSourceFiles(from command: String, changedFile: String) -> (allFiles: [String], otherFiles: [String]) {
+        var swiftFiles: [String] = []
+        
+        // Split command into components, handling quoted arguments
+        let components = parseCommandComponents(command)
+        
+        // Find Swift files (ending with .swift)
+        for component in components {
+            let cleanPath = component.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if cleanPath.hasSuffix(".swift") {
+                swiftFiles.append(cleanPath)
+            }
+        }
+        
+        // Filter out the changed file to create list of other files
+        // Normalize paths for accurate comparison
+        let normalizedChangedFile = URL(fileURLWithPath: changedFile).standardized.path
+        let otherFiles = swiftFiles.filter { file in
+            let normalizedFile = URL(fileURLWithPath: file).standardized.path
+            return normalizedFile != normalizedChangedFile
+        }
+        
+        log("🔍 Extracted \(swiftFiles.count) Swift files from command (\(otherFiles.count) others)")
+        return (allFiles: swiftFiles, otherFiles: otherFiles)
+    }
+    
+    /// Parse command string into components, respecting quoted arguments
+    private func parseCommandComponents(_ command: String) -> [String] {
+        var components: [String] = []
+        var currentComponent = ""
+        var inQuotes = false
+        var quoteChar: Character = "\""
+        var i = command.startIndex
+        
+        while i < command.endIndex {
+            let char = command[i]
+            
+            if !inQuotes {
+                if char == "\"" || char == "'" {
+                    inQuotes = true
+                    quoteChar = char
+                    currentComponent.append(char)
+                } else if char.isWhitespace {
+                    if !currentComponent.isEmpty {
+                        components.append(currentComponent)
+                        currentComponent = ""
+                    }
+                } else {
+                    currentComponent.append(char)
+                }
+            } else {
+                currentComponent.append(char)
+                if char == quoteChar {
+                    // Check if it's escaped
+                    let prevIndex = command.index(before: i)
+                    if prevIndex >= command.startIndex && command[prevIndex] != "\\" {
+                        inQuotes = false
+                    }
+                }
+            }
+            
+            i = command.index(after: i)
+        }
+        
+        // Add the last component if not empty
+        if !currentComponent.isEmpty {
+            components.append(currentComponent)
+        }
+        
+        return components
+    }
+    
+    /// Transform Bazel command to use Swift frontend mode for single-file compilation
+    /// Returns nil if transformation isn't beneficial or fails
+    private func transformToFrontendMode(command: String, primaryFile: String) -> String? {
+        // Check if frontend optimization is disabled via environment variable
+        if let _ = getenv("INJECTION_DISABLE_FRONTEND_OPTIMIZATION") {
+            log("⚡ Frontend optimization disabled via INJECTION_DISABLE_FRONTEND_OPTIMIZATION")
+            return nil
+        }
+        
+        let (allFiles, otherFiles) = extractSwiftSourceFiles(from: command, changedFile: primaryFile)
+        
+        // Only optimize if there are multiple Swift files (worth the frontend overhead)
+        guard allFiles.count > 1 else {
+            log("⚡ Skipping frontend optimization: only \(allFiles.count) Swift file(s)")
+            return nil
+        }
+        
+        log("⚡ Transforming to frontend mode: primary=\(URL(fileURLWithPath: primaryFile).lastPathComponent), others=\(otherFiles.count)")
+        
+        var transformedCommand = command
+        
+        // Step 1: Replace 'swiftc' with 'swiftc -frontend'
+        if let swiftcRange = transformedCommand.range(of: "swiftc") {
+            transformedCommand.replaceSubrange(swiftcRange, with: "swiftc -frontend")
+        }
+        
+        // Step 2: Remove all .swift files from the command
+        for swiftFile in allFiles {
+            // Handle both quoted and unquoted file paths
+            let quotedFile = "\"\(swiftFile)\""
+            let patterns = [
+                " \(swiftFile)(?=\\s|$)",
+                " \(quotedFile)(?=\\s|$)",
+                "\\s+\(NSRegularExpression.escapedPattern(for: swiftFile))(?=\\s|$)",
+                "\\s+\(NSRegularExpression.escapedPattern(for: quotedFile))(?=\\s|$)"
+            ]
+            
+            for pattern in patterns {
+                if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                    let range = NSRange(transformedCommand.startIndex..., in: transformedCommand)
+                    transformedCommand = regex.stringByReplacingMatches(in: transformedCommand, options: [], range: range, withTemplate: "")
+                }
+            }
+        }
+        
+        // Step 3: Add -primary-file with the changed file
+        transformedCommand += " -primary-file \(primaryFile)"
+        
+        // Step 4: Add other Swift files as secondary sources
+        for otherFile in otherFiles {
+            transformedCommand += " \(otherFile)"  
+        }
+        
+        log("✅ Frontend mode transformation complete")
+        return transformedCommand
     }
     
     
