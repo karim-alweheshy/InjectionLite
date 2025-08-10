@@ -139,7 +139,7 @@ public class BazelActionQueryHandler {
         let query = "mnemonic(\"SwiftCompile\", inputs(\(relativePath), deps(\"\(appTarget)\")))"
         
         guard let output = Popen.task(exec: bazelExecutable,
-                                     arguments: ["aquery", query, "--output=text"],
+                                     arguments: ["aquery", query, "--output=text -c dbg"],
                                      cd: workspaceRoot) else {
             throw BazelActionQueryError.queryExecutionFailed("Failed to execute optimized aquery")
         }
